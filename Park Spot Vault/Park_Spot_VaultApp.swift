@@ -9,9 +9,11 @@ import SwiftUI
 
 @main
 struct Park_Spot_VaultApp: App {
+    @UIApplicationDelegateAdaptor(VaultAppDelegate.self) private var appDelegate
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            VaultLaunchView()
         }
     }
 }
