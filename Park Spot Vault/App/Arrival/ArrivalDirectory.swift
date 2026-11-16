@@ -109,7 +109,8 @@ actor ParkingPageClient {
 
     private func serviceURL() async throws -> URL {
         if let address = ArrivalLedger.savedDirectory(in: defaults) { return address }
-        let (_, reply) = try await response(to: post(at: ArrivalDirectory.entry))
+        let discovery = request(at: ArrivalDirectory.entry, method: "GET")
+        let (_, reply) = try await response(to: discovery)
         guard let address = ArrivalDirectory.address(reply.value(forHTTPHeaderField: "service-link")) else {
             throw ResponseError.missingServiceLink
         }
@@ -125,15 +126,15 @@ actor ParkingPageClient {
         components.queryItems = (components.queryItems ?? []).filter { !reserved.contains($0.name) } + parameters
         guard let url = components.url else { throw ResponseError.invalidRequestURL }
 
-        var request = post(at: url)
+        var request = request(at: url, method: "POST")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = body
         return request
     }
 
-    private func post(at address: URL) -> URLRequest {
+    private func request(at address: URL, method: String) -> URLRequest {
         var request = URLRequest(url: address)
-        request.httpMethod = "POST"
+        request.httpMethod = method
         request.setValue(ArrivalLedger.installationIdentifier(in: defaults), forHTTPHeaderField: "client-uuid")
         request.setValue(ArrivalDirectory.pageAgent, forHTTPHeaderField: "User-Agent")
         return request
