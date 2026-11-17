@@ -17,7 +17,7 @@ struct DestinationSurface: UIViewControllerRepresentable {
 
 final class DestinationController: UIViewController, WKNavigationDelegate, WKUIDelegate {
     private var primary: WKWebView!
-    private var windows: [WKWebView] = []
+    private var windows: [WKWebView: UIStackView] = [:]
     private var loading: UIHostingController<ArrivalLoadingPlate>?
     private var address: URL?
     private var networkRetries = 0
@@ -29,8 +29,8 @@ final class DestinationController: UIViewController, WKNavigationDelegate, WKUID
 
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
-        let surface = install(configuration, inset: true)
-        primary = surface
+        primary = makePage(configuration)
+        mount(primary)
 
         let plate = UIHostingController(rootView: ArrivalLoadingPlate())
         addChild(plate)
@@ -86,15 +86,48 @@ final class DestinationController: UIViewController, WKNavigationDelegate, WKUID
             UIApplication.shared.open(url)
             return nil
         }
-        let child = install(configuration, inset: false)
-        windows.append(child)
+        let child = makePage(configuration)
+        let toolbar = UIView()
+        toolbar.backgroundColor = .secondarySystemBackground
+        let close = UIButton(type: .close)
+        close.accessibilityLabel = "Close tab"
+        close.addAction(UIAction { [weak self, weak child] _ in
+            if let child { self?.closeWindow(child) }
+        }, for: .touchUpInside)
+        toolbar.addSubview(close)
+        close.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            toolbar.heightAnchor.constraint(equalToConstant: 44),
+            close.trailingAnchor.constraint(equalTo: toolbar.layoutMarginsGuide.trailingAnchor),
+            close.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor)
+        ])
+        let window = UIStackView(arrangedSubviews: [toolbar, child])
+        window.axis = .vertical
+        window.backgroundColor = .systemBackground
+        dismissLoading()
+        mount(window)
+        windows[child] = window
         return child
     }
 
     func webViewDidClose(_ surface: WKWebView) {
-        guard surface !== primary else { return }
-        surface.removeFromSuperview()
-        windows.removeAll { $0 === surface }
+        closeWindow(surface)
+    }
+
+    func webView(
+        _ surface: WKWebView,
+        requestMediaCapturePermissionFor origin: WKSecurityOrigin,
+        initiatedByFrame frame: WKFrameInfo,
+        type: WKMediaCaptureType,
+        decisionHandler: @escaping (WKPermissionDecision) -> Void
+    ) {
+        decisionHandler(.prompt)
+    }
+
+    private func closeWindow(_ surface: WKWebView) {
+        guard let window = windows.removeValue(forKey: surface) else { return }
+        surface.stopLoading()
+        window.removeFromSuperview()
     }
 
     func webViewWebContentProcessDidTerminate(_ surface: WKWebView) {
@@ -113,7 +146,7 @@ final class DestinationController: UIViewController, WKNavigationDelegate, WKUID
         recover(surface, from: error)
     }
 
-    private func install(_ configuration: WKWebViewConfiguration, inset: Bool) -> WKWebView {
+    private func makePage(_ configuration: WKWebViewConfiguration) -> WKWebView {
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
 
@@ -122,17 +155,20 @@ final class DestinationController: UIViewController, WKNavigationDelegate, WKUID
         surface.navigationDelegate = self
         surface.uiDelegate = self
         surface.allowsBackForwardNavigationGestures = true
+        return surface
+    }
+
+    private func mount(_ surface: UIView) {
         surface.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(surface)
 
         let safeArea = view.safeAreaLayoutGuide
         NSLayoutConstraint.activate([
-            surface.topAnchor.constraint(equalTo: inset ? safeArea.topAnchor : view.topAnchor),
-            surface.leadingAnchor.constraint(equalTo: inset ? safeArea.leadingAnchor : view.leadingAnchor),
-            surface.trailingAnchor.constraint(equalTo: inset ? safeArea.trailingAnchor : view.trailingAnchor),
-            surface.bottomAnchor.constraint(equalTo: inset ? safeArea.bottomAnchor : view.bottomAnchor)
+            surface.topAnchor.constraint(equalTo: safeArea.topAnchor),
+            surface.leadingAnchor.constraint(equalTo: safeArea.leadingAnchor),
+            surface.trailingAnchor.constraint(equalTo: safeArea.trailingAnchor),
+            surface.bottomAnchor.constraint(equalTo: safeArea.bottomAnchor)
         ])
-        return surface
     }
 
     private func opensExternally(_ url: URL) -> Bool {
@@ -179,9 +215,16 @@ final class DestinationController: UIViewController, WKNavigationDelegate, WKUID
 private struct ArrivalLoadingPlate: View {
     var body: some View {
         ZStack {
-            VaultBackground()
-            LoadingScreen()
+            JournalPalette.pine.ignoresSafeArea()
+            VStack(spacing: 16) {
+                JournalMark()
+                Text("Golden Run")
+                    .font(.system(.title, design: .serif, weight: .semibold))
+                    .foregroundStyle(JournalPalette.cream)
+                ProgressView()
+                    .tint(JournalPalette.gold)
+                    .accessibilityLabel("Loading page")
+            }
         }
-        .environment(\.colorScheme, .dark)
     }
 }

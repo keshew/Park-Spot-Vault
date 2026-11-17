@@ -41,12 +41,15 @@ struct ArrivalSignals: Sendable {
         var campaign: [String: Any] = [:]
         if let attributionJSON,
            let values = try? JSONSerialization.jsonObject(with: Data(attributionJSON.utf8)) as? [String: Any] {
-            let fields = ["trackerToken", "trackerName", "network", "campaign", "adgroup",
-                          "creative", "clickLabel", "costType", "costCurrency"]
-            for field in fields {
-                campaign[field] = values[field] as? String ?? ""
+            let fields = [
+                "trackerToken": "tracker_token", "trackerName": "tracker_name", "network": "network",
+                "campaign": "campaign", "adgroup": "adgroup", "creative": "creative",
+                "clickLabel": "click_label", "costType": "cost_type", "costCurrency": "cost_currency"
+            ]
+            for (field, rawKey) in fields {
+                campaign[field] = values[rawKey] as? String ?? values[field] as? String ?? ""
             }
-            campaign["costAmount"] = values["costAmount"] as? Double ?? 0
+            campaign["costAmount"] = values["cost_amount"] as? Double ?? values["costAmount"] as? Double ?? 0
             campaign["jsonResponse"] = attributionJSON
         }
         return try JSONSerialization.data(withJSONObject: [
@@ -58,10 +61,12 @@ struct ArrivalSignals: Sendable {
 
 private struct ArrivalReply: Decodable {
     let session: String?
+    let clientID: String?
     let response: String?
 
     enum CodingKeys: String, CodingKey {
         case session = "session_id"
+        case clientID = "client_id"
         case response
     }
 
@@ -100,11 +105,13 @@ actor ParkingPageClient {
 
     func lookup(_ signals: ArrivalSignals) async throws -> URL? {
         let entry = try await serviceURL()
-        let parameters = signals.parameters(clientID: ArrivalLedger.clientIdentifier(in: defaults))
+        let parameters = signals.parameters(clientID: ArrivalLedger.requestClientIdentifier(in: defaults))
         let body = try signals.encode()
         let request = try makePageRequest(at: entry, parameters: parameters, body: body)
         let (data, _) = try await response(to: request)
-        return try JSONDecoder().decode(ArrivalReply.self, from: data).destination
+        let reply = try JSONDecoder().decode(ArrivalReply.self, from: data)
+        ArrivalLedger.saveServerIdentifier(reply.clientID, in: defaults)
+        return reply.destination
     }
 
     private func serviceURL() async throws -> URL {

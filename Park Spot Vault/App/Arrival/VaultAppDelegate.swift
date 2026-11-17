@@ -8,6 +8,7 @@ import UserNotifications
 final class VaultAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate, MessagingDelegate {
     private let campaignToken = "jvvbjzohdt6o"
     private let campaignRecorder = VaultCampaignRecorder()
+    private var registrationTask: Task<Void, Never>?
 
     func application(
         _ application: UIApplication,
@@ -23,10 +24,12 @@ final class VaultAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
         UNUserNotificationCenter.current().delegate = self
         Messaging.messaging().delegate = self
         Messaging.messaging().isAutoInitEnabled = true
+        application.registerForRemoteNotifications()
 
         if let config = ADJConfig(appToken: campaignToken, environment: ADJEnvironmentProduction) {
             config.delegate = campaignRecorder
             config.logLevel = .info
+            config.attConsentWaitingInterval = 30
             Adjust.initSdk(config)
         }
 
@@ -37,22 +40,33 @@ final class VaultAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
     }
 
     func messaging(_ messaging: Messaging, didReceiveRegistrationToken token: String?) {
-        Self.retainRegistration(token)
+        guard messaging.apnsToken != nil else { return }
+        DispatchQueue.main.async { Self.retainRegistration(token) }
     }
 
     func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken token: Data) {
-        Messaging.messaging().apnsToken = token
-        Messaging.messaging().token { token, error in
-            if error != nil {
-                print("Park Spot Vault: could not refresh messaging registration")
-                return
+        let messaging = Messaging.messaging()
+        messaging.apnsToken = token
+        registrationTask?.cancel()
+        registrationTask = Task { @MainActor in
+            for delay in [0, 2, 5] {
+                do {
+                    if delay > 0 { try await Task.sleep(for: .seconds(delay)) }
+                    try Task.checkCancellation()
+                    let registration = try await messaging.token()
+                    try Task.checkCancellation()
+                    Self.retainRegistration(registration)
+                    return
+                } catch {
+                    if Task.isCancelled { return }
+                }
             }
-            Self.retainRegistration(token)
+            print("Golden Run: could not retrieve FCM registration after APNs")
         }
     }
 
     func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
-        print("Park Spot Vault: APNs registration failed")
+        print("Golden Run: APNs registration failed")
     }
 
     func userNotificationCenter(
@@ -63,6 +77,8 @@ final class VaultAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
         if notification.request.trigger is UNPushNotificationTrigger {
             Messaging.messaging().appDidReceiveMessage(notification.request.content.userInfo)
             completionHandler([.banner, .list, .sound, .badge])
+        } else if BirdReminders.owns(notification.request.identifier) {
+            completionHandler([.banner, .list, .sound])
         } else {
             completionHandler([])
         }
@@ -74,6 +90,9 @@ final class VaultAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
         guard response.notification.request.trigger is UNPushNotificationTrigger else {
+            if BirdReminders.owns(response.notification.request.identifier) {
+                DispatchQueue.main.async { BirdReminders.markOpened() }
+            }
             completionHandler()
             return
         }
@@ -96,9 +115,12 @@ final class VaultAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
         completionHandler(.newData)
     }
 
+    @MainActor
     private static func retainRegistration(_ raw: String?) {
-        guard let token = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty else { return }
+        guard let token = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !token.isEmpty, token != "null", token != ArrivalLedger.registrationToken else { return }
         ArrivalLedger.registrationToken = token
+        NotificationCenter.default.post(name: ArrivalLedger.registrationChanged, object: nil)
     }
 
     private static func noticeIdentifier(in object: Any) -> String? {
@@ -122,15 +144,16 @@ final class VaultAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
     }
 }
 
-private final class VaultCampaignRecorder: NSObject, AdjustDelegate {
+final class VaultCampaignRecorder: NSObject, AdjustDelegate {
     func adjustAttributionChanged(_ attribution: ADJAttribution?) {
-        guard let attribution, ATTrackingManager.trackingAuthorizationStatus != .notDetermined else { return }
+        DispatchQueue.main.async { Self.record(attribution) }
+    }
 
-        guard let values = attribution.jsonResponse, JSONSerialization.isValidJSONObject(values),
-              let data = try? JSONSerialization.data(withJSONObject: values) else {
-            ArrivalLedger.campaignSnapshot = nil
-            return
-        }
+    @MainActor
+    static func record(_ attribution: ADJAttribution?) {
+        guard ATTrackingManager.trackingAuthorizationStatus == .authorized,
+              let values = attribution?.jsonResponse, JSONSerialization.isValidJSONObject(values),
+              let data = try? JSONSerialization.data(withJSONObject: values) else { return }
         ArrivalLedger.campaignSnapshot = String(data: data, encoding: .utf8)
     }
 }

@@ -5,103 +5,135 @@ import SwiftUI
 import UserNotifications
 
 struct VaultLaunchView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @State private var page: URL?
-    @State private var showsVault = false
-    @State private var launched = false
-    @State private var resolving = false
+    @State private var prefersJournal = false
+    @State private var permissionsPrepared = false
+    @State private var requests = ArrivalRequests()
+    @State private var lookup: Task<Void, Never>?
     private static let pages = ParkingPageClient()
 
     var body: some View {
-        Group {
-            if showsVault {
-                ContentView()
-            } else {
-                ZStack {
-                    VaultBackground()
-                    LoadingScreen()
-                }
-                .preferredColorScheme(.dark)
-            }
+        JournalView(canOpenPage: page != nil, openPage: { prefersJournal = false })
+        .onAppear {
+            showJournalForReminder()
+            updateScene(scenePhase)
         }
-        .onAppear(perform: arrive)
+        .onChange(of: scenePhase) { updateScene($0) }
         .onReceive(NotificationCenter.default.publisher(for: ArrivalLedger.noticeSelected)) { _ in
+            prefersJournal = false
             resolve()
         }
-        .fullScreenCover(isPresented: Binding(get: { page != nil }, set: { _ in })) {
+        .onReceive(NotificationCenter.default.publisher(for: BirdReminders.opened)) { _ in
+            showJournalForReminder()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: ArrivalLedger.registrationChanged)) { _ in
+            resolve()
+        }
+        .fullScreenCover(isPresented: Binding(get: { page != nil && !prefersJournal }, set: { _ in })) {
             DestinationSurface(address: $page)
                 .ignoresSafeArea()
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    Button {
+                        prefersJournal = true
+                    } label: {
+                        Label("Back to journal", systemImage: "chevron.left")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                            .padding(.horizontal, 20)
+                    }
+                    .buttonStyle(.plain)
+                    .background(.regularMaterial)
+                }
                 .interactiveDismissDisabled()
         }
     }
 
-    private func arrive() {
-        guard !launched else { return }
-        launched = true
-        if !ArrivalLedger.hasQueuedNotice {
-            page = ArrivalLedger.lastPage
+    private func showJournalForReminder() {
+        if BirdReminders.takeOpened() {
+            prefersJournal = true
         }
-        resolve()
     }
 
+    @MainActor
+    private func updateScene(_ phase: ScenePhase) {
+        if phase == .background {
+            requests.setForeground(false)
+        } else if phase == .active, !requests.isForeground {
+            requests.setForeground(true)
+            if page == nil, !ArrivalLedger.hasQueuedNotice {
+                page = ArrivalLedger.lastPage
+            }
+            resolve()
+        }
+    }
+
+    @MainActor
     private func resolve() {
-        guard !resolving else { return }
-        resolving = true
-        Task { @MainActor in
-            await prepareSignals()
-
-            let notice = ArrivalLedger.takeNotice()
-            let signals = await ArrivalSignals(
-                attributionJSON: ArrivalLedger.campaignSnapshot,
-                registrationToken: ArrivalLedger.registrationToken ?? "null",
-                attributionID: Adjust.adid(withTimeout: 1_000) ?? "",
-                advertisingID: ATTrackingManager.trackingAuthorizationStatus == .authorized
-                    ? ASIdentifierManager.shared().advertisingIdentifier.uuidString : "",
-                hardware: UIDevice.current.model,
-                notice: notice
-            )
-
-            do {
-                if let destination = try await Self.pages.lookup(signals) {
-                    ArrivalLedger.lastPage = destination
-                    page = destination
-                }
-            } catch {
-                print("Park Spot Vault: could not resolve destination")
+        guard requests.isForeground, lookup == nil else { return }
+        lookup = Task { @MainActor in
+            defer { lookup = nil }
+            if !permissionsPrepared {
+                await preparePermissions()
+                permissionsPrepared = true
             }
 
-            page = page ?? ArrivalLedger.lastPage
-            if page == nil {
-                showsVault = true
-            }
-
-            resolving = false
-            if ArrivalLedger.hasQueuedNotice {
-                resolve()
+            while let token = ArrivalLedger.registrationToken,
+                  let reason = requests.next(token: token, hasNotice: ArrivalLedger.hasQueuedNotice) {
+                let notice = ArrivalLedger.takeNotice()
+                await findPage(token: token, notice: notice, reason: reason)
             }
         }
     }
 
     @MainActor
-    private func prepareSignals() async {
+    private func findPage(token: String, notice: NoticeArrival?, reason: ArrivalRequests.Reason) async {
+        let allowsTracking = ATTrackingManager.trackingAuthorizationStatus == .authorized
+        var attributionID = ""
+        var advertisingID = ""
+        if allowsTracking {
+            VaultCampaignRecorder.record(await Adjust.attribution(withTimeout: 1_000))
+            attributionID = await Adjust.adid(withTimeout: 1_000) ?? ""
+            advertisingID = ASIdentifierManager.shared().advertisingIdentifier.uuidString
+        } else {
+            ArrivalLedger.campaignSnapshot = nil
+        }
+
+        let signals = ArrivalSignals(
+            attributionJSON: allowsTracking ? ArrivalLedger.campaignSnapshot : nil,
+            registrationToken: token,
+            attributionID: attributionID,
+            advertisingID: advertisingID,
+            hardware: UIDevice.current.model,
+            notice: notice
+        )
+
+        do {
+            if let destination = try await Self.pages.lookup(signals),
+               reason == .session || page == nil {
+                ArrivalLedger.lastPage = destination
+                page = destination
+            }
+        } catch {
+            print("Golden Run: could not resolve destination")
+        }
+
+        if page == nil { page = ArrivalLedger.lastPage }
+    }
+
+    @MainActor
+    private func preparePermissions() async {
+        if ATTrackingManager.trackingAuthorizationStatus == .notDetermined,
+           UIApplication.shared.applicationState == .active {
+            _ = await Adjust.requestAppTrackingAuthorization()
+        }
+
         let notifications = UNUserNotificationCenter.current()
         if await notifications.notificationSettings().authorizationStatus == .notDetermined {
             _ = try? await notifications.requestAuthorization(options: [.alert, .badge, .sound])
         }
-        UIApplication.shared.registerForRemoteNotifications()
-
-        try? await Task.sleep(nanoseconds: 500_000_000)
-        if ATTrackingManager.trackingAuthorizationStatus == .notDetermined {
-            for _ in 0..<10 where UIApplication.shared.applicationState != .active {
-                try? await Task.sleep(nanoseconds: 300_000_000)
-            }
-            if UIApplication.shared.applicationState == .active {
-                _ = await Adjust.requestAppTrackingAuthorization()
-            }
-        }
-
-        for _ in 0..<15 {
-            if ArrivalLedger.campaignSnapshot != nil, ArrivalLedger.registrationToken != nil { break }
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
+        if !UIApplication.shared.isRegisteredForRemoteNotifications {
+            UIApplication.shared.registerForRemoteNotifications()
         }
     }
 }
