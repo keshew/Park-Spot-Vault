@@ -2,13 +2,15 @@ import SwiftUI
 @preconcurrency import WebKit
 
 struct DestinationSurface: UIViewControllerRepresentable {
-    @Binding var address: URL?
+    let address: URL?
+    let didLoad: (URL) -> Void
 
     func makeUIViewController(context: Context) -> DestinationController {
         DestinationController()
     }
 
     func updateUIViewController(_ controller: DestinationController, context: Context) {
+        controller.didLoad = didLoad
         if let address {
             controller.display(address)
         }
@@ -18,7 +20,8 @@ struct DestinationSurface: UIViewControllerRepresentable {
 final class DestinationController: UIViewController, WKNavigationDelegate, WKUIDelegate {
     private var primary: WKWebView!
     private var windows: [WKWebView: UIStackView] = [:]
-    private var loading: UIHostingController<ArrivalLoadingPlate>?
+    var didLoad: ((URL) -> Void)?
+    private var initialNavigation: WKNavigation?
     private var address: URL?
     private var networkRetries = 0
     private var processRestarts = 0
@@ -32,13 +35,6 @@ final class DestinationController: UIViewController, WKNavigationDelegate, WKUID
         primary = makePage(configuration)
         mount(primary)
 
-        let plate = UIHostingController(rootView: ArrivalLoadingPlate())
-        addChild(plate)
-        view.addSubview(plate.view)
-        plate.view.frame = view.bounds
-        plate.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        plate.didMove(toParent: self)
-        loading = plate
     }
 
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask { .all }
@@ -54,13 +50,13 @@ final class DestinationController: UIViewController, WKNavigationDelegate, WKUID
         loadViewIfNeeded()
         address = destination
         networkRetries = 0
-        primary.load(URLRequest(url: destination))
+        initialNavigation = primary.load(URLRequest(url: destination))
     }
 
     func webView(_ surface: WKWebView, didFinish navigation: WKNavigation!) {
-        if surface === primary {
-            dismissLoading()
-        }
+        guard surface === primary, let navigation, navigation === initialNavigation, let address else { return }
+        initialNavigation = nil
+        didLoad?(address)
     }
 
     func webView(
@@ -104,7 +100,6 @@ final class DestinationController: UIViewController, WKNavigationDelegate, WKUID
         let window = UIStackView(arrangedSubviews: [toolbar, child])
         window.axis = .vertical
         window.backgroundColor = .systemBackground
-        dismissLoading()
         mount(window)
         windows[child] = window
         return child
@@ -134,16 +129,17 @@ final class DestinationController: UIViewController, WKNavigationDelegate, WKUID
         guard processRestarts < 2 else { return }
         processRestarts += 1
         if let url = surface.url ?? (surface === primary ? address : nil) {
-            surface.load(URLRequest(url: url))
+            let recovery = surface.load(URLRequest(url: url))
+            if surface === primary, initialNavigation != nil { initialNavigation = recovery }
         }
     }
 
     func webView(_ surface: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        recover(surface, from: error)
+        recover(surface, from: error, navigation: navigation)
     }
 
     func webView(_ surface: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        recover(surface, from: error)
+        recover(surface, from: error, navigation: navigation)
     }
 
     private func makePage(_ configuration: WKWebViewConfiguration) -> WKWebView {
@@ -176,7 +172,7 @@ final class DestinationController: UIViewController, WKNavigationDelegate, WKUID
         return ["tg", "telegram", "mailto", "tel", "sms", "whatsapp", "itms-apps"].contains(scheme)
     }
 
-    private func recover(_ surface: WKWebView, from error: Error) {
+    private func recover(_ surface: WKWebView, from error: Error, navigation: WKNavigation?) {
         let failure = error as NSError
         guard failure.domain == NSURLErrorDomain, failure.code != NSURLErrorCancelled else { return }
 
@@ -196,29 +192,38 @@ final class DestinationController: UIViewController, WKNavigationDelegate, WKUID
               let retry = failedAddress ?? surface.url ?? address else { return }
         networkRetries += 1
         let currentDestination = address
+        let isInitial = navigation != nil && navigation === initialNavigation
         let delay = Double(networkRetries)
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak surface] in
             guard let self, let surface, self.address == currentDestination else { return }
-            surface.load(URLRequest(url: retry))
+            let next = surface.load(URLRequest(url: retry))
+            if isInitial { self.initialNavigation = next }
         }
     }
 
-    private func dismissLoading() {
-        guard let loading else { return }
-        loading.willMove(toParent: nil)
-        loading.view.removeFromSuperview()
-        loading.removeFromParent()
-        self.loading = nil
-    }
 }
 
 struct ArrivalLoadingPlate: View {
+    var title = "Connecting…"
+
     var body: some View {
         ZStack {
-            Color(uiColor: .systemBackground).ignoresSafeArea()
-            ProgressView()
-                .controlSize(.large)
-                .accessibilityLabel("Loading")
+            Color(red: 0.97, green: 0.97, blue: 0.965).ignoresSafeArea()
+            VStack(spacing: 12) {
+                ProgressView()
+                    .controlSize(.large)
+                    .tint(Color(red: 0.26, green: 0.29, blue: 0.32))
+                    .accessibilityHidden(true)
+                Text(title)
+                    .font(.title2.weight(.semibold))
+                    .foregroundStyle(Color(red: 0.12, green: 0.15, blue: 0.18))
+                Text("Please wait a moment.")
+                    .font(.subheadline)
+                    .foregroundStyle(Color(red: 0.31, green: 0.34, blue: 0.37))
+            }
+            .multilineTextAlignment(.center)
+            .padding(24)
+            .accessibilityElement(children: .combine)
         }
     }
 }

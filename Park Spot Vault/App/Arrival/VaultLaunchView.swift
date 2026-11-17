@@ -5,6 +5,7 @@ import SwiftUI
 import UserNotifications
 
 struct VaultLaunchView: View {
+    @State private var loadedPage: URL?
     @Environment(\.scenePhase) private var scenePhase
     @State private var page: URL?
     @State private var resolvedLaunch = false
@@ -15,6 +16,7 @@ struct VaultLaunchView: View {
     private static let pages = ParkingPageClient()
 
     var body: some View {
+        let webContentIsReady = isPageVisible
         ZStack {
             if resolvedLaunch {
                 JournalView(canOpenPage: page != nil, openPage: { prefersJournal = false })
@@ -47,23 +49,47 @@ struct VaultLaunchView: View {
         .onReceive(NotificationCenter.default.publisher(for: ArrivalLedger.registrationChanged)) { _ in
             resolve()
         }
-        .fullScreenCover(isPresented: Binding(get: { page != nil && !prefersJournal }, set: { _ in })) {
-            DestinationSurface(address: $page)
+        .fullScreenCover(isPresented: Binding(get: { page != nil && !prefersJournal }, set: { _ in }), onDismiss: { loadedPage = nil }) {
+            DestinationSurface(address: page, didLoad: { loadedPage = $0 })
                 .ignoresSafeArea()
                 .safeAreaInset(edge: .top, spacing: 0) {
-                    Button {
-                        prefersJournal = true
-                    } label: {
-                        Label("Back to journal", systemImage: "chevron.left")
-                            .font(.subheadline.weight(.semibold))
-                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                            .padding(.horizontal, 20)
+                    if webContentIsReady {
+                        Button {
+                            prefersJournal = true
+                        } label: {
+                            Label("Back to journal", systemImage: "chevron.left")
+                                .font(.subheadline.weight(.semibold))
+                                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                                .padding(.horizontal, 20)
+                        }
+                        .buttonStyle(.plain)
+                        .background(.regularMaterial)
                     }
-                    .buttonStyle(.plain)
-                    .background(.regularMaterial)
+                }
+                .accessibilityHidden(!webContentIsReady)
+                .overlay {
+                    if !webContentIsReady {
+                        ArrivalLoadingPlate(title: "Opening page…")
+                    }
                 }
                 .interactiveDismissDisabled()
+                .task(id: page) {
+                    guard let requested = page, !isPageVisible else { return }
+                    do {
+                        try await Task.sleep(for: .seconds(25))
+                        if page == requested, !isPageVisible {
+                            page = nil
+                        }
+                    } catch {
+                        return
+                    }
+                }
         }
+    }
+
+    private var isPageVisible: Bool {
+        guard let requested = page else { return false }
+        return loadedPage == requested
     }
 
     private func showJournalForReminder() {
