@@ -140,7 +140,7 @@ actor ParkingPageClient {
     }
 
     private func request(at address: URL, method: String) -> URLRequest {
-        var request = URLRequest(url: address)
+        var request = URLRequest(url: address, timeoutInterval: 15)
         request.httpMethod = method
         request.setValue(ArrivalLedger.installationIdentifier(in: defaults), forHTTPHeaderField: "client-uuid")
         request.setValue(ArrivalDirectory.pageAgent, forHTTPHeaderField: "User-Agent")

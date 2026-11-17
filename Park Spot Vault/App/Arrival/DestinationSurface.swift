@@ -212,19 +212,13 @@ final class DestinationController: UIViewController, WKNavigationDelegate, WKUID
     }
 }
 
-private struct ArrivalLoadingPlate: View {
+struct ArrivalLoadingPlate: View {
     var body: some View {
         ZStack {
-            JournalPalette.pine.ignoresSafeArea()
-            VStack(spacing: 16) {
-                JournalMark()
-                Text("Golden Run")
-                    .font(.system(.title, design: .serif, weight: .semibold))
-                    .foregroundStyle(JournalPalette.cream)
-                ProgressView()
-                    .tint(JournalPalette.gold)
-                    .accessibilityLabel("Loading page")
-            }
+            Color(uiColor: .systemBackground).ignoresSafeArea()
+            ProgressView()
+                .controlSize(.large)
+                .accessibilityLabel("Loading")
         }
     }
 }

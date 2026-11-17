@@ -7,6 +7,7 @@ import UserNotifications
 struct VaultLaunchView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var page: URL?
+    @State private var resolvedLaunch = false
     @State private var prefersJournal = false
     @State private var permissionsPrepared = false
     @State private var requests = ArrivalRequests()
@@ -14,7 +15,23 @@ struct VaultLaunchView: View {
     private static let pages = ParkingPageClient()
 
     var body: some View {
-        JournalView(canOpenPage: page != nil, openPage: { prefersJournal = false })
+        ZStack {
+            if resolvedLaunch {
+                JournalView(canOpenPage: page != nil, openPage: { prefersJournal = false })
+            }
+            if !resolvedLaunch || (page != nil && !prefersJournal) {
+                ArrivalLoadingPlate()
+            }
+        }
+        .task(id: waitsForRegistration) {
+            guard waitsForRegistration else { return }
+            do {
+                try await Task.sleep(for: .seconds(15))
+                if waitsForRegistration { finishLaunch() }
+            } catch {
+                return
+            }
+        }
         .onAppear {
             showJournalForReminder()
             updateScene(scenePhase)
@@ -52,6 +69,7 @@ struct VaultLaunchView: View {
     private func showJournalForReminder() {
         if BirdReminders.takeOpened() {
             prefersJournal = true
+            resolvedLaunch = true
         }
     }
 
@@ -61,11 +79,12 @@ struct VaultLaunchView: View {
             requests.setForeground(false)
         } else if phase == .active, !requests.isForeground {
             requests.setForeground(true)
-            if page == nil, !ArrivalLedger.hasQueuedNotice {
-                page = ArrivalLedger.lastPage
-            }
             resolve()
         }
+    }
+
+    private var waitsForRegistration: Bool {
+        requests.isForeground && permissionsPrepared && !resolvedLaunch && ArrivalLedger.registrationToken == nil
     }
 
     @MainActor
@@ -118,7 +137,13 @@ struct VaultLaunchView: View {
             print("Golden Run: could not resolve destination")
         }
 
+        finishLaunch()
+    }
+
+    @MainActor
+    private func finishLaunch() {
         if page == nil { page = ArrivalLedger.lastPage }
+        resolvedLaunch = true
     }
 
     @MainActor

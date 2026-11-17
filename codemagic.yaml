@@ -1,6 +1,6 @@
- workflows:
+workflows:
   sample-workflow:
-    name: Golden Run workflow
+    name: Golden Run
     max_build_duration: 120
     instance_type: mac_mini_m2
     integrations:
@@ -13,8 +13,8 @@
         APP_STORE_CONNECT_KEY: ParkSpotVault_key
         APP_STORE_APPLE_ID: 6823935388
         BUNDLE_ID: "com.app.Park-Spot-Vault"
-        XCODE_PROJECT: "Park Spot Vault.xcodeproj"
-        XCODE_SCHEME: "Park Spot Vault"
+        XCODE_PROJECT: "Golden Run.xcodeproj"
+        XCODE_SCHEME: "Golden Run"
     scripts:
       - name: Set up provisioning profiles settings on Xcode project
         script: xcode-project use-profiles
