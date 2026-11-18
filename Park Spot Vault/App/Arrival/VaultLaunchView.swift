@@ -1,6 +1,7 @@
 import AdjustSdk
 import AdSupport
 import AppTrackingTransparency
+import OSLog
 import SwiftUI
 import UserNotifications
 
@@ -14,6 +15,8 @@ struct VaultLaunchView: View {
     @State private var requests = ArrivalRequests()
     @State private var lookup: Task<Void, Never>?
     private static let pages = ParkingPageClient()
+    private static let attributionTimeoutMilliseconds = 15_000
+    private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "GoldenRun", category: "Registration")
 
     var body: some View {
         let webContentIsReady = isPageVisible
@@ -51,21 +54,6 @@ struct VaultLaunchView: View {
         }
         .fullScreenCover(isPresented: Binding(get: { page != nil && !prefersJournal }, set: { _ in }), onDismiss: { loadedPage = nil }) {
             DestinationSurface(address: page, didLoad: { loadedPage = $0 })
-                .ignoresSafeArea()
-                .safeAreaInset(edge: .top, spacing: 0) {
-                    if webContentIsReady {
-                        Button {
-                            prefersJournal = true
-                        } label: {
-                            Label("Back to journal", systemImage: "chevron.left")
-                                .font(.subheadline.weight(.semibold))
-                                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                                .padding(.horizontal, 20)
-                        }
-                        .buttonStyle(.plain)
-                        .background(.regularMaterial)
-                    }
-                }
                 .accessibilityHidden(!webContentIsReady)
                 .overlay {
                     if !webContentIsReady {
@@ -133,26 +121,30 @@ struct VaultLaunchView: View {
 
     @MainActor
     private func findPage(token: String, notice: NoticeArrival?, reason: ArrivalRequests.Reason) async {
-        let allowsTracking = ATTrackingManager.trackingAuthorizationStatus == .authorized
-        var attributionID = ""
-        var advertisingID = ""
-        if allowsTracking {
-            VaultCampaignRecorder.record(await Adjust.attribution(withTimeout: 1_000))
-            attributionID = await Adjust.adid(withTimeout: 1_000) ?? ""
-            advertisingID = ASIdentifierManager.shared().advertisingIdentifier.uuidString
-        } else {
-            ArrivalLedger.campaignSnapshot = nil
+        await requestTrackingIfActive()
+        var adid = ""
+        if ATTrackingManager.trackingAuthorizationStatus == .authorized {
+            async let pendingADID = Adjust.adid(withTimeout: Self.attributionTimeoutMilliseconds)
+            VaultCampaignRecorder.record(await Adjust.attribution(withTimeout: Self.attributionTimeoutMilliseconds))
+            adid = await pendingADID ?? ""
         }
+
+        let trackingStatus = ATTrackingManager.trackingAuthorizationStatus
+        let allowsTracking = trackingStatus == .authorized
+        if !allowsTracking { ArrivalLedger.campaignSnapshot = nil }
 
         let signals = ArrivalSignals(
             attributionJSON: allowsTracking ? ArrivalLedger.campaignSnapshot : nil,
             registrationToken: token,
-            attributionID: attributionID,
-            advertisingID: advertisingID,
+            attributionID: allowsTracking ? adid : "",
+            advertisingID: allowsTracking ? ASIdentifierManager.shared().advertisingIdentifier.uuidString : "",
             hardware: UIDevice.current.model,
             notice: notice
         )
 
+        Self.logger.notice(
+            "Sending registration. ATT: \(trackingStatus.rawValue), ADID: \(!signals.attributionID.isEmpty), attribution: \(signals.attributionJSON != nil)"
+        )
         do {
             if let destination = try await Self.pages.lookup(signals),
                reason == .session || page == nil {
@@ -173,11 +165,20 @@ struct VaultLaunchView: View {
     }
 
     @MainActor
-    private func preparePermissions() async {
-        if ATTrackingManager.trackingAuthorizationStatus == .notDetermined,
-           UIApplication.shared.applicationState == .active {
+    private func requestTrackingIfActive() async {
+        guard ATTrackingManager.trackingAuthorizationStatus == .notDetermined else { return }
+        for _ in 0..<10 {
+            if UIApplication.shared.applicationState == .active { break }
+            try? await Task.sleep(for: .milliseconds(300))
+        }
+        if UIApplication.shared.applicationState == .active {
             _ = await Adjust.requestAppTrackingAuthorization()
         }
+    }
+
+    @MainActor
+    private func preparePermissions() async {
+        await requestTrackingIfActive()
 
         let notifications = UNUserNotificationCenter.current()
         if await notifications.notificationSettings().authorizationStatus == .notDetermined {

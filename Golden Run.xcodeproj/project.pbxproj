@@ -290,7 +290,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.1.6;
+				MARKETING_VERSION = 1.1.7;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.app.Park-Spot-Vault";
 				PRODUCT_NAME = "Golden Run";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -329,7 +329,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.1.6;
+				MARKETING_VERSION = 1.1.7;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.app.Park-Spot-Vault";
 				PRODUCT_NAME = "Golden Run";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";

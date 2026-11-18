@@ -1,3 +1,4 @@
+import OSLog
 import SwiftUI
 @preconcurrency import WebKit
 
@@ -18,8 +19,9 @@ struct DestinationSurface: UIViewControllerRepresentable {
 }
 
 final class DestinationController: UIViewController, WKNavigationDelegate, WKUIDelegate {
+    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "DestinationPages", category: "WebNavigation")
     private var primary: WKWebView!
-    private var windows: [WKWebView: UIStackView] = [:]
+    private var windows: Set<WKWebView> = []
     var didLoad: ((URL) -> Void)?
     private var initialNavigation: WKNavigation?
     private var address: URL?
@@ -53,10 +55,29 @@ final class DestinationController: UIViewController, WKNavigationDelegate, WKUID
         initialNavigation = primary.load(URLRequest(url: destination))
     }
 
-    func webView(_ surface: WKWebView, didFinish navigation: WKNavigation!) {
+    func webView(_ surface: WKWebView, didCommit navigation: WKNavigation!) {
+        if windows.contains(surface) {
+            // The initial empty document must not cover the opener for an HTTP request.
+            if let url = surface.url, url.absoluteString != "about:blank" {
+                surface.isHidden = false
+            }
+            logger.info("New window committed a document")
+        }
         guard surface === primary, let navigation, navigation === initialNavigation, let address else { return }
         initialNavigation = nil
         didLoad?(address)
+    }
+
+    func webView(
+        _ surface: WKWebView,
+        decidePolicyFor navigationResponse: WKNavigationResponse,
+        decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void
+    ) {
+        if windows.contains(surface), navigationResponse.isForMainFrame,
+           let response = navigationResponse.response as? HTTPURLResponse {
+            logger.info("New window received HTTP \(response.statusCode, privacy: .public)")
+        }
+        decisionHandler(.allow)
     }
 
     func webView(
@@ -83,25 +104,13 @@ final class DestinationController: UIViewController, WKNavigationDelegate, WKUID
             return nil
         }
         let child = makePage(configuration)
-        let toolbar = UIView()
-        toolbar.backgroundColor = .secondarySystemBackground
-        let close = UIButton(type: .close)
-        close.accessibilityLabel = "Close tab"
-        close.addAction(UIAction { [weak self, weak child] _ in
-            if let child { self?.closeWindow(child) }
-        }, for: .touchUpInside)
-        toolbar.addSubview(close)
-        close.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            toolbar.heightAnchor.constraint(equalToConstant: 44),
-            close.trailingAnchor.constraint(equalTo: toolbar.layoutMarginsGuide.trailingAnchor),
-            close.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor)
-        ])
-        let window = UIStackView(arrangedSubviews: [toolbar, child])
-        window.axis = .vertical
-        window.backgroundColor = .systemBackground
-        mount(window)
-        windows[child] = window
+        child.customUserAgent = surface.customUserAgent
+        let scheme = navigationAction.request.url?.scheme?.lowercased() ?? "none"
+        // Empty windows can be filled directly by the opener, without an HTTP response.
+        child.isHidden = scheme == "http" || scheme == "https"
+        mount(child)
+        windows.insert(child)
+        logger.info("Created new window for URL scheme \(scheme, privacy: .public)")
         return child
     }
 
@@ -120,9 +129,9 @@ final class DestinationController: UIViewController, WKNavigationDelegate, WKUID
     }
 
     private func closeWindow(_ surface: WKWebView) {
-        guard let window = windows.removeValue(forKey: surface) else { return }
+        guard windows.remove(surface) != nil else { return }
         surface.stopLoading()
-        window.removeFromSuperview()
+        surface.removeFromSuperview()
     }
 
     func webViewWebContentProcessDidTerminate(_ surface: WKWebView) {
@@ -135,11 +144,23 @@ final class DestinationController: UIViewController, WKNavigationDelegate, WKUID
     }
 
     func webView(_ surface: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        handlePopupFailure(error, in: surface)
         recover(surface, from: error, navigation: navigation)
     }
 
     func webView(_ surface: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        handlePopupFailure(error, in: surface)
         recover(surface, from: error, navigation: navigation)
+    }
+
+    private func handlePopupFailure(_ error: Error, in surface: WKWebView) {
+        guard windows.contains(surface) else { return }
+        let failure = error as NSError
+        guard failure.domain != NSURLErrorDomain || failure.code != NSURLErrorCancelled else { return }
+        logger.error("New window navigation failed: \(failure.domain, privacy: .public) \(failure.code, privacy: .public)")
+        if surface.isHidden {
+            closeWindow(surface)
+        }
     }
 
     private func makePage(_ configuration: WKWebViewConfiguration) -> WKWebView {

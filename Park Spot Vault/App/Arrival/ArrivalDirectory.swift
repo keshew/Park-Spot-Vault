@@ -47,15 +47,15 @@ struct ArrivalSignals: Sendable {
                 "clickLabel": "click_label", "costType": "cost_type", "costCurrency": "cost_currency"
             ]
             for (field, rawKey) in fields {
-                campaign[field] = values[rawKey] as? String ?? values[field] as? String ?? ""
+                let value = values[rawKey] as? String ?? values[field] as? String ?? ""
+                campaign[field] = value
+                if !value.isEmpty, rawKey != field { campaign[rawKey] = value }
             }
             campaign["costAmount"] = values["cost_amount"] as? Double ?? values["costAmount"] as? Double ?? 0
             campaign["jsonResponse"] = attributionJSON
         }
-        return try JSONSerialization.data(withJSONObject: [
-            "adjust": campaign,
-            "referrer": "utm_source=appstore&utm_medium=organic"
-        ])
+        if !attributionID.isEmpty { campaign["adid"] = attributionID }
+        return try JSONSerialization.data(withJSONObject: ["adjust": campaign])
     }
 }
 
